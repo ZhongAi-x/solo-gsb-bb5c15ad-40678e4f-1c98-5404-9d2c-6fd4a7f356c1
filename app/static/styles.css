@@ -506,3 +506,52 @@ tr.dg-detail-row td { background: #fbfcfe; padding: 10px 14px; }
 tr.bf-unmet-row td { background: #fdf3f3; }
 tr.bf-met-row td { background: #f4faf6; }
 .bf-elig { color: var(--muted); font-size: 12px; }
+
+/* ---------- ⑩ 项目权重临界点分析 ---------- */
+.weight-controls { flex-wrap: wrap; align-items: center; gap: 10px; }
+.weight-controls label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.weight-controls .select { min-width: 120px; }
+.weight-controls input[type="number"] { width: 96px; }
+.weight-result { margin-top: 14px; }
+.wt-banner {
+  background: #f6f4ff;
+  border: 1px solid #e2dcff;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #3a355c;
+  margin-bottom: 12px;
+}
+.wt-banner .wt-crit { color: #6d3fe0; }
+.wt-banner .wt-note { color: var(--muted); font-size: 12px; }
+.wt-banner .wt-stale { color: var(--red); font-weight: 600; margin-top: 4px; }
+.wt-entry {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 10px 0;
+  background: #fff;
+}
+.wt-entry h4 { margin: 0 0 6px; font-size: 14px; }
+.wt-entry h4 small { color: var(--muted); font-weight: 400; }
+.wt-entry-critical { border-left: 4px solid #6d3fe0; background: #fbf9ff; }
+.wt-entry-mid { border-left: 4px solid var(--line); }
+.wt-tie-line { margin: 2px 0 8px; }
+.wt-tie-name { font-weight: 600; color: #6d3fe0; }
+.wt-eq { color: var(--muted); margin: 0 2px; }
+.wt-or { color: var(--line); }
+.wt-crit { color: #6d3fe0; }
+.wt-table-wrap { max-width: 640px; }
+.wt-table-wrap th { white-space: normal; font-size: 12px; }
+tr.wt-tie-row td { background: #f3efff; }
+.wt-tie-tag {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: #6d3fe0;
+  border-radius: 4px;
+  padding: 0 6px;
+}
+.wt-missing { color: var(--muted); font-size: 12px; }

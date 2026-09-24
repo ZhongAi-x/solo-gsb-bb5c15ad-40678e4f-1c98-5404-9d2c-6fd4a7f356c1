@@ -35,6 +35,7 @@ from .scoring import (
     compare_contestants,
     stability_experiment,
 )
+from .weight_analysis import WeightValidationError, weight_threshold_analysis
 
 SAMPLE_PATH = os.environ.get(
     "CALIB_SAMPLE_PATH",
@@ -87,6 +88,13 @@ class BackfillBody(BaseModel):
     target: int = Field(ge=1, le=1_000_000)
     # 评委 -> 本轮可接任务数；未提供的评委按 0 处理。
     capacities: dict[str, int] = Field(default_factory=dict)
+
+
+class WeightBody(BaseModel):
+    # 要连续调整倍率的项目；基于当前校准范围与逐项裁决形成的项目最终均分。
+    item: str = Field(min_length=1, max_length=200)
+    # 倍率上限（1～5），倍率始终从 0 连续变化到该上限，其余项目恒为 1。
+    upper_bound: float = Field(ge=1.0, le=5.0)
 
 
 class RuleBody(BaseModel):
@@ -455,6 +463,29 @@ def backfill_preview(session_id: str, body: BackfillBody) -> dict[str, Any]:
     plan["scope"] = scope
     plan["scope_label"] = SCOPE_LABELS[scope]
     return plan
+
+
+@app.post("/api/sessions/{session_id}/weight-thresholds")
+def weight_thresholds(session_id: str, body: WeightBody) -> dict[str, Any]:
+    """项目权重临界点分析（只读）。
+
+    以当前校准范围与逐项裁决形成的**项目最终均分**为基础，令指定项目倍率
+    从 0 连续变化到上限，其余项目倍率恒为 1，枚举区间内所有选手总分相等的
+    临界倍率（合并同位置交点；始终并列的选手不产生交点），并给出每个临界
+    点及相邻开区间中点处的竞赛名次与总分。缺失该项目的选手按 0 贡献。
+    结果每次请求实时重算，不写入评分、裁决或会话。
+    """
+    with db.get_conn() as conn:
+        if db.get_scope(conn, session_id) is None:
+            raise HTTPException(status_code=404, detail="会话不存在，请先上传数据。")
+        scope = _resolve_scope(conn, session_id, None)
+        analysis = _build_analysis(conn, session_id, scope)
+    if analysis["counts"]["scores"] == 0:
+        raise HTTPException(status_code=404, detail="当前会话没有评分数据，无法分析权重临界点。")
+    try:
+        return weight_threshold_analysis(analysis, body.item, body.upper_bound)
+    except WeightValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.delete("/api/sessions/{session_id}")

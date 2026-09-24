@@ -26,6 +26,9 @@ let backfillStale = false; // 预览参数在出结果后又被修改
 let backfillCaps = {}; // 各评委本轮可接任务数（草稿，按评委名持久）
 let backfillJudgeKey = ""; // 当前容量输入表对应的评委有序集合
 let backfillSig = ""; // 最近一次预览所基于的原始评分签名，用于识别数据变化
+let weightData = null; // 项目权重临界点分析最近一次只读结果
+let weightReqId = 0; // 丢弃过期的权重分析响应
+let weightSig = ""; // 最近一次权重结果所基于的（评分+裁决+范围）签名
 
 const $ = (sel) => document.querySelector(sel);
 const dashboard = $("#dashboard");
@@ -80,6 +83,10 @@ function render() {
     backfillSig = "";
     setBackfillMsg("");
     renderBackfillPanel();
+    weightReqId += 1;
+    weightData = null;
+    weightSig = "";
+    renderWeightPanel();
     return;
   }
   emptyState.hidden = true;
@@ -97,6 +104,18 @@ function render() {
   if (backfillData) {
     backfillData.scope = analysis.scope;
     backfillData.scope_label = analysis.scope_label;
+  }
+
+  // 权重临界点结果依赖评分、逐项裁决与校准范围；任一变化都标记为过期。
+  const ws = weightSignature(analysis);
+  if (weightData && ws !== weightSig) {
+    // 上传/合并/裁决/范围变化后旧结果作废：清除并以当前选择自动重算一次。
+    weightData = null;
+    setWeightMsg("基础数据已变化（评分/裁决/校准范围），正在重新计算…");
+    runWeightAnalysis();
+  } else if (!weightData && analysis.items.length) {
+    // 首次有数据时，用当前选择自动计算一次（项目/上限改变由控件事件触发）。
+    runWeightAnalysis();
   }
 
   const ref = analysis.reference;
@@ -122,6 +141,7 @@ function render() {
   renderStability();
   refreshCompare();
   renderBackfillPanel();
+  renderWeightPanel();
 }
 
 // ---------- Ranking stability experiment ----------
@@ -1183,6 +1203,165 @@ backfillClearBtn.addEventListener("click", () => {
   renderBackfillPanel();
   setBackfillMsg("已清除预览，数据未做任何改动。", "ok");
 });
+
+// ---------- Item weight threshold analysis (read-only) ----------
+const weightItemSel = $("#weight-item");
+const weightUpperInput = $("#weight-upper");
+const weightRunBtn = $("#btn-weight-run");
+const weightResultEl = $("#weight-result");
+
+function setWeightMsg(text, cls = "") {
+  const el = $("#weight-msg");
+  if (el) {
+    el.textContent = text;
+    el.className = "msg " + cls;
+  }
+}
+
+// 结果依赖当前校准范围、逐项裁决（最终总分/项目最终均分）与评分本身。
+function weightSignature(a) {
+  const parts = ["scope:" + a.scope];
+  for (const b of a.contestants) {
+    parts.push(`${b.contestant}=${Number(b.eff_total).toFixed(10)}`);
+    for (const ib of b.items) {
+      parts.push(`${b.contestant}|${ib.item}=${Number(ib.eff_avg).toFixed(10)}`);
+    }
+  }
+  return parts.join("#");
+}
+
+function syncWeightControls() {
+  const hasData = !!(analysis && analysis.counts.scores > 0);
+  const prev = weightItemSel.value;
+  weightItemSel.innerHTML = hasData
+    ? analysis.items.map((it) => `<option value="${esc(it)}">${esc(it)}</option>`).join("")
+    : "";
+  if (hasData && analysis.items.includes(prev)) weightItemSel.value = prev;
+  weightRunBtn.disabled = !hasData;
+  weightItemSel.disabled = !hasData;
+  weightUpperInput.disabled = !hasData;
+}
+
+function renderWeightPanel() {
+  syncWeightControls();
+  renderWeightResult();
+}
+
+function renderWeightResult() {
+  if (!weightData) {
+    weightResultEl.innerHTML = "";
+    return;
+  }
+  const p = weightData;
+  const s = p.summary;
+  const missingNote = p.contestants_missing_item.length
+    ? `缺失该项目（按 <b>0 贡献</b>，斜率为 0）：${p.contestants_missing_item.map(esc).join("、")}。`
+    : "所有选手在该项目均有评分。";
+  const alwaysNote = p.always_tied_groups.length
+    ? `<br><span class="wt-note">始终并列（不产生交点）：</span>` +
+      p.always_tied_groups.map((g) => `<b>${g.map(esc).join(" = ")}</b>`).join("；")
+    : "";
+  const banner = `
+    <div class="wt-banner">
+      项目 <b>${esc(p.item)}</b> 倍率从 <b>${fmt(p.lower, 1)}</b> 连续变化到上限 <b>${fmt(p.upper_bound, 1)}</b>
+      （校准范围：${esc(p.scope_label)}，只读、实时计算，不写入数据）｜
+      选手 <b>${s.contestants}</b> 名，区间内选手对相交 <b>${s.crossing_pairs}</b> 次，
+      合并同位置交点后临界倍率 <b class="wt-crit">${s.critical_points}</b> 个，
+      相邻开区间中点 <b>${s.interval_midpoints}</b> 个。<br>
+      <span class="wt-note">${missingNote}</span>${alwaysNote}
+    </div>`;
+
+  const rankTable = (entry) => {
+    const rows = entry.ranking.map((r) => `
+      <tr class="${r.tied ? "wt-tie-row" : ""}">
+        <td class="num"><b>${r.rank}</b></td>
+        <td>${esc(r.contestant)}${r.tied ? ' <span class="wt-tie-tag">交点并列</span>' : ""}</td>
+        <td class="num">${r.has_item ? fmt(r.item_avg) : '<span class="wt-missing">无（0 贡献）</span>'}</td>
+        <td class="num"><b>${fmt(r.total)}</b></td>
+      </tr>`).join("");
+    return `
+      <div class="table-wrap wt-table-wrap"><table>
+        <tr><th class="num">名次</th><th>选手</th><th class="num">该项目最终均分</th><th class="num">总分</th></tr>
+        ${rows}
+      </table></div>`;
+  };
+
+  const blocks = p.entries.map((e) => {
+    if (e.kind === "critical") {
+      const atEdge = e.boundary === "start" ? "（区间起点 w=0）"
+        : e.boundary === "end" ? `（区间上限 w=${fmt(p.upper_bound, 1)}）` : "";
+      const tieHtml = e.ties
+        .map((g) => g.map((n) => `<span class="wt-tie-name">${esc(n)}</span>`).join('<span class="wt-eq"> = </span>'))
+        .join('<span class="wt-or">　｜　</span>');
+      return `
+        <div class="wt-entry wt-entry-critical">
+          <h4>🔶 临界倍率 w = <b class="wt-crit">${fmt(e.w, 4)}</b> ${atEdge}</h4>
+          <p class="hint wt-tie-line">交点处并列：${tieHtml}</p>
+          ${rankTable(e)}
+        </div>`;
+    }
+    return `
+      <div class="wt-entry wt-entry-mid">
+        <h4>▫ 开区间中点 w = <b>${fmt(e.w, 4)}</b>
+          <small>（相邻临界点 <code>${fmt(e.left, 4)}</code> &lt; w &lt; <code>${fmt(e.right, 4)}</code> 的中点）</small>
+        </h4>
+        ${rankTable(e)}
+      </div>`;
+  }).join("");
+
+  weightResultEl.innerHTML = banner +
+    (blocks
+      ? blocks
+      : '<p class="no-reversal">该区间内没有任何选手对相交：所有选手总分的相对次序在整个区间保持不变。</p>');
+}
+
+function runWeightAnalysis() {
+  if (!analysis || analysis.counts.scores === 0) return;
+  let item = weightItemSel.value;
+  // 重新上传后旧选择可能已不存在：回落到第一个项目并同步控件。
+  if (!analysis.items.includes(item)) {
+    item = analysis.items[0];
+    weightItemSel.value = item;
+  }
+  const upper = Number(weightUpperInput.value);
+  if (!item) {
+    setWeightMsg("请先选择要分析的项目。", "error");
+    return;
+  }
+  if (!Number.isFinite(upper) || upper < 1 || upper > 5) {
+    setWeightMsg("倍率上限必须是 1～5 之间的数字。", "error");
+    toast("倍率上限必须在 1～5 之间", true);
+    return;
+  }
+  const myId = ++weightReqId;
+  setWeightMsg("计算中…");
+  api(`/api/sessions/${SESSION_ID}/weight-thresholds`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ item, upper_bound: upper }),
+  })
+    .then((data) => {
+      if (myId !== weightReqId) return;
+      weightData = data;
+      weightSig = weightSignature(analysis);
+      renderWeightPanel();
+      setWeightMsg(
+        `计算完成：${data.summary.critical_points} 个临界倍率（未写入任何数据，只读）。`,
+        "ok",
+      );
+    })
+    .catch((err) => {
+      if (myId !== weightReqId) return;
+      weightData = null;
+      renderWeightPanel();
+      setWeightMsg(err.message, "error");
+      toast("权重临界点分析失败：" + err.message, true);
+    });
+}
+
+weightRunBtn.addEventListener("click", runWeightAnalysis);
+weightItemSel.addEventListener("change", runWeightAnalysis);
+weightUpperInput.addEventListener("change", runWeightAnalysis);
 
 // ---------- Decision updates ----------
 let inflight = false;

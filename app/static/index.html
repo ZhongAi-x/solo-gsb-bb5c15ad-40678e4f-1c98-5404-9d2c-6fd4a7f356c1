@@ -178,6 +178,29 @@
       <p class="hint">对每条原始评分选择「采用校准分」或「保留原分」并填写理由，排名将实时重算。</p>
       <div id="detail-panel"></div>
     </section>
+
+    <!-- 10. 项目权重临界点分析 -->
+    <section class="card">
+      <h2>⑩ 项目权重临界点分析（只读）</h2>
+      <p class="hint">
+        在当前<b>校准范围</b>与<b>逐项裁决</b>形成的<b>项目最终均分</b>基础上，选择一个项目与倍率上限（1～5），
+        令该项目倍率从 <b>0</b> 连续变化到上限、其余项目倍率恒为 <b>1</b>，枚举区间内<b>所有选手总分相等的临界倍率</b>
+        （同位置交点自动合并；<b>始终并列的选手不产生交点</b>），并展示每个临界点及相邻开区间中点处的<b>竞赛名次与总分</b>，
+        标出交点处并列的选手。选手缺失该项目时该项目<b>按 0 贡献</b>（斜率为 0）。
+        结果<b>只读、实时计算</b>：评分、裁决或校准范围变化后需重新计算，不写入任何数据。
+      </p>
+      <div class="toolbar weight-controls">
+        <label>项目
+          <select id="weight-item" class="select"></select>
+        </label>
+        <label>倍率上限
+          <input type="number" id="weight-upper" class="select" min="1" max="5" step="0.5" value="3">
+        </label>
+        <button id="btn-weight-run" class="btn btn-primary">计算临界点</button>
+        <span id="weight-msg" class="msg"></span>
+      </div>
+      <div id="weight-result" class="weight-result"></div>
+    </section>
   </div>
 </main>
 
