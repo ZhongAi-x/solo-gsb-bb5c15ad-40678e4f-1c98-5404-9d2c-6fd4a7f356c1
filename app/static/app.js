@@ -75,6 +75,12 @@ function render() {
     emptyState.hidden = false;
     compareReqId += 1;
     compareData = null;
+    weightData = null;
+    weightStale = false;
+    weightSig = "";
+    weightReqId += 1;
+    setWeightMsg("");
+    renderWeightPanel();
     backfillData = null;
     backfillStale = false;
     backfillSig = "";
@@ -97,6 +103,17 @@ function render() {
   if (backfillData) {
     backfillData.scope = analysis.scope;
     backfillData.scope_label = analysis.scope_label;
+  }
+
+  // 项目权重临界点分析依赖最终项目均分：评分/裁决/校准范围变化后旧结果标记过期。
+  if (weightData) {
+    const wsig = weightSignature(analysis);
+    if (wsig !== weightSig) {
+      weightStale = true;
+    } else {
+      weightData.scope = analysis.scope;
+      weightData.scope_label = analysis.scope_label;
+    }
   }
 
   const ref = analysis.reference;
@@ -122,6 +139,7 @@ function render() {
   renderStability();
   refreshCompare();
   renderBackfillPanel();
+  renderWeightPanel();
 }
 
 // ---------- Ranking stability experiment ----------
@@ -1182,6 +1200,168 @@ backfillClearBtn.addEventListener("click", () => {
   backfillStale = false;
   renderBackfillPanel();
   setBackfillMsg("已清除预览，数据未做任何改动。", "ok");
+});
+
+// ---------- Item weight critical-point analysis (read-only) ----------
+const weightItemSel = $("#weight-item");
+const weightUpperInput = $("#weight-upper");
+const weightRunBtn = $("#btn-weight-run");
+const weightClearBtn = $("#btn-weight-clear");
+let weightData = null; // 最近一次项目权重临界点分析（只读，不落库）
+let weightStale = false; // 出结果后评分/裁决/校准范围发生了变化
+let weightSig = ""; // 最近一次结果所基于的「最终项目均分」签名
+let weightReqId = 0; // 丢弃过期响应
+
+function setWeightMsg(text, cls = "") {
+  const el = $("#weight-msg");
+  if (el) {
+    el.textContent = text;
+    el.className = "msg " + cls;
+  }
+}
+
+// 结果只依赖校准范围与逐项裁决后的「选手 × 项目最终均分」。
+function weightSignature(a) {
+  const parts = [a.scope];
+  for (const b of a.contestants) {
+    for (const ib of b.items) parts.push(`${b.contestant}|${ib.item}|${ib.eff_avg}`);
+  }
+  return parts.join("#");
+}
+
+function syncWeightControls() {
+  const hasData = !!(analysis && analysis.counts.scores > 0);
+  const prev = weightItemSel.value;
+  weightItemSel.innerHTML =
+    `<option value="" disabled${prev ? "" : " selected"}>请选择项目…</option>` +
+    (hasData ? analysis.items.map((i) => `<option value="${esc(i)}">${esc(i)}</option>`).join("") : "");
+  if (analysis && analysis.items.includes(prev)) weightItemSel.value = prev;
+  weightItemSel.disabled = !hasData;
+  weightUpperInput.disabled = !hasData;
+  weightRunBtn.disabled = !hasData;
+  weightClearBtn.disabled = !weightData;
+}
+
+function renderWeightPanel() {
+  syncWeightControls();
+  const panel = $("#weight-result");
+  if (!weightData) {
+    panel.innerHTML = "";
+    return;
+  }
+  const p = weightData;
+
+  const missing = p.contestants.filter((c) => !c.has_item);
+  const alwaysText = p.always_tied_groups.length
+    ? p.always_tied_groups
+        .map((g) => `<span class="wa-always">${g.contestants.map(esc).join("、")}（${g.size} 人）</span>`)
+        .join("；")
+    : '<span class="delta-flat">无</span>';
+  const banner = `
+    <div class="wa-banner">
+      项目 <b>${esc(p.item)}</b> 倍率 <code>w</code>：<b>0 → ${fmt(p.upper, 2).replace(/\.?0+$/, "")}</b>
+      （校准范围：<b>${esc(p.scope_label)}</b>，只读不保存）｜
+      闭区间内临界倍率 <b class="wa-crit">${p.critical_count}</b> 个（不含端点；同位置交点已合并），
+      相邻开区间中点 <b>${p.midpoints.length}</b> 个。<br>
+      总分公式：<code>${esc(p.formula)}</code><br>
+      始终并列（不产生交点）：${alwaysText}。
+      ${missing.length
+        ? `<br><span class="wa-missing">在「${esc(p.item)}」无评分、该项目按 0 贡献的选手：${missing.map((c) => esc(c.contestant)).join("、")}。</span>`
+        : ""}
+      ${weightStale
+        ? '<br><span class="wa-stale">⚠ 评分、裁决或校准范围在上次计算后已变化，以下结果已过期，请重新计算。</span>'
+        : '<br><span class="wa-note">结果由当前数据实时计算，未写入任何存储。</span>'}
+    </div>`;
+
+  // 每个临界点 / 中点一张小表，按倍率递增交错排列。
+  const blocks = p.timeline.map((pt, idx) => {
+    const isMid = pt.kind === "midpoint";
+    const headCls = isMid ? "wa-head-mid" : pt.kind === "critical" ? "wa-head-crit" : "wa-head-end";
+    // 临界点通常是比值，保留 4 位有效展示并去掉末尾多余的 0；整数倍显示为整数。
+    const wText = String(parseFloat(pt.weight.toFixed(6)));
+    const tieBadges = (pt.tie_groups || [])
+      .map(
+        (g) =>
+          `<span class="wa-tie-tag">交点并列 ${g.size} 人（总分 ${fmt(g.total)}）：${g.contestants.map(esc).join("、")}</span>`,
+      )
+      .join("");
+    const rows = pt.standings
+      .map((r) => {
+        const tags = [];
+        if (r.tied) tags.push('<span class="wa-tie-mark">并列</span>');
+        if (r.always_tied) tags.push('<span class="wa-always-mark">始终并列</span>');
+        return `
+        <tr class="${r.tied ? "wa-tie-row" : ""}">
+          <td class="num"><b>${r.rank}</b></td>
+          <td>${esc(r.contestant)}</td>
+          <td class="num"><b>${fmt(r.total)}</b></td>
+          <td>${tags.join(" ")}</td>
+        </tr>`;
+      })
+      .join("");
+    return `
+    <div class="wa-block ${isMid ? "wa-block-mid" : "wa-block-crit"}" data-wa="${idx}">
+      <div class="wa-block-head ${headCls}">
+        ${isMid ? "▫ 开区间中点" : pt.kind === "critical" ? "★ 临界倍率" : "● 区间端点"}
+        <code>w = ${wText}</code>
+        <small>${esc(pt.label)}</small>
+      </div>
+      <div class="table-wrap wa-table-wrap"><table>
+        <tr><th class="num">竞赛名次</th><th>选手</th><th class="num">总分</th><th>并列标记</th></tr>
+        ${rows}
+      </table></div>
+      ${tieBadges ? `<div class="wa-tie-list">${tieBadges}</div>` : ""}
+    </div>`;
+  }).join("");
+
+  panel.innerHTML = banner + `<div class="wa-timeline">${blocks}</div>`;
+}
+
+weightRunBtn.addEventListener("click", () => {
+  if (!analysis || analysis.counts.scores === 0) return;
+  const item = weightItemSel.value;
+  const upper = Number(weightUpperInput.value);
+  if (!item) {
+    setWeightMsg("请先选择要分析的项目。", "error");
+    return;
+  }
+  if (!Number.isFinite(upper) || upper < 1 || upper > 5) {
+    setWeightMsg("倍率上限必须是 1～5 之间的数字。", "error");
+    toast("请填写 1～5 的倍率上限", true);
+    return;
+  }
+  const myId = ++weightReqId;
+  setWeightMsg("临界点计算中…");
+  api(`/api/sessions/${SESSION_ID}/weight-analysis`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ item, upper }),
+  })
+    .then((data) => {
+      if (myId !== weightReqId) return;
+      weightData = data;
+      weightStale = false;
+      weightSig = weightSignature(analysis);
+      renderWeightPanel();
+      setWeightMsg(
+        `计算完成：闭区间内 ${data.critical_count} 个临界倍率（未写入任何数据）。`,
+        "ok",
+      );
+    })
+    .catch((err) => {
+      if (myId !== weightReqId) return;
+      setWeightMsg(err.message, "error");
+      toast("临界点分析失败：" + err.message, true);
+    });
+});
+
+weightClearBtn.addEventListener("click", () => {
+  weightData = null;
+  weightStale = false;
+  weightSig = "";
+  weightReqId += 1;
+  renderWeightPanel();
+  setWeightMsg("已清除结果，数据未做任何改动。", "ok");
 });
 
 // ---------- Decision updates ----------

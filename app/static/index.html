@@ -172,9 +172,32 @@
       <div id="backfill-result" class="backfill-result"></div>
     </section>
 
-    <!-- 9. 逐项裁决 -->
+    <!-- 9. 项目权重临界点分析 -->
     <section class="card">
-      <h2>⑨ 逐项评分裁决</h2>
+      <h2>⑨ 项目权重临界点分析（只读）</h2>
+      <p class="hint">
+        选择一个项目与倍率上限（<b>1～5</b>）：以当前校准范围与逐项裁决形成的<b>项目最终均分</b>为基础，
+        令该项目倍率 <code>w</code> 从 <b>0 连续变化到上限</b>，其余项目倍率恒为 1，选手总分为
+        <code>其余项目最终均分之和 + w × 该项目最终均分</code>（在该项目无评分的选手按 <b>0 贡献</b>）。
+        系统求出闭区间内<b>所有选手总分相等的临界倍率</b>（同一位置的交点合并；始终并列的选手不产生交点），
+        并展示<b>每个临界点及相邻开区间中点处的竞赛名次、总分</b>，标出交点处并列的选手。
+        结果<b>只读、不保存</b>；评分、裁决或校准范围变化后请重新计算。
+      </p>
+      <div class="toolbar weight-controls">
+        <label>项目 <select id="weight-item" class="select"></select></label>
+        <label class="weight-upper">倍率上限（1～5）
+          <input type="number" id="weight-upper" class="select" min="1" max="5" step="0.5" value="3">
+        </label>
+        <button id="btn-weight-run" class="btn btn-primary">计算临界点</button>
+        <button id="btn-weight-clear" class="btn btn-ghost-card" disabled>清除结果</button>
+        <span id="weight-msg" class="msg"></span>
+      </div>
+      <div id="weight-result" class="weight-result"></div>
+    </section>
+
+    <!-- 10. 逐项裁决 -->
+    <section class="card">
+      <h2>⑩ 逐项评分裁决</h2>
       <p class="hint">对每条原始评分选择「采用校准分」或「保留原分」并填写理由，排名将实时重算。</p>
       <div id="detail-panel"></div>
     </section>

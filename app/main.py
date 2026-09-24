@@ -35,6 +35,7 @@ from .scoring import (
     compare_contestants,
     stability_experiment,
 )
+from .weight_analysis import MAX_UPPER, WeightAnalysisError, weight_analysis
 
 SAMPLE_PATH = os.environ.get(
     "CALIB_SAMPLE_PATH",
@@ -87,6 +88,13 @@ class BackfillBody(BaseModel):
     target: int = Field(ge=1, le=1_000_000)
     # 评委 -> 本轮可接任务数；未提供的评委按 0 处理。
     capacities: dict[str, int] = Field(default_factory=dict)
+
+
+class WeightAnalysisBody(BaseModel):
+    # 要做权重扫描的项目；该项目倍率从 0 连续变化到 upper，其余项目恒为 1。
+    item: str = Field(min_length=1, max_length=200)
+    # 倍率上限（1～5）。
+    upper: float = Field(ge=1.0, le=MAX_UPPER)
 
 
 class RuleBody(BaseModel):
@@ -455,6 +463,33 @@ def backfill_preview(session_id: str, body: BackfillBody) -> dict[str, Any]:
     plan["scope"] = scope
     plan["scope_label"] = SCOPE_LABELS[scope]
     return plan
+
+
+@app.post("/api/sessions/{session_id}/weight-analysis")
+def weight_critical_analysis(session_id: str, body: WeightAnalysisBody) -> dict[str, Any]:
+    """项目权重临界点分析（只读）：扫描单个项目倍率 0→upper 上的总分交点。
+
+    以当前校准范围与逐项裁决形成的项目最终均分为基础，其余项目倍率恒为 1，
+    缺失项目按 0 贡献。返回闭区间 [0, upper] 内全部「选手总分相等」的临界倍率
+    （同位置交点合并，始终并列的选手不产生交点），以及每个临界点与相邻开区间
+    中点处的竞赛名次、总分与并列选手。纯内存计算，不写入任何数据；评分、裁决
+    或校准范围变化后重新请求即得到最新结果。
+    """
+    with db.get_conn() as conn:
+        if db.get_scope(conn, session_id) is None:
+            raise HTTPException(status_code=404, detail="会话不存在，请先上传数据。")
+        scope = _resolve_scope(conn, session_id, None)
+        analysis = _build_analysis(conn, session_id, scope)
+    if analysis["counts"]["scores"] == 0:
+        raise HTTPException(status_code=404, detail="当前会话没有评分数据，无法进行权重临界点分析。")
+    item_name = body.item.strip()
+    if not item_name:
+        raise HTTPException(status_code=400, detail="项目名称不能为空。")
+    try:
+        result = weight_analysis(analysis, item_name, float(body.upper))
+    except WeightAnalysisError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return result
 
 
 @app.delete("/api/sessions/{session_id}")

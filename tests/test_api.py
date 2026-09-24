@@ -512,6 +512,188 @@ class TestAPI(unittest.TestCase):
         self.assertEqual(g["comparable_pairs"], 0)
         self.assertIsNone(g["discordance_rate"])
 
+    def test_24_weight_analysis_endpoint(self):
+        # 简单数据（每个项目仅一位评委打全 → 校准分恒等，故直接看原始分含义）：
+        # X：A=9, B=6, C=3（单评委 MAD=0，校准分=全局中位数，改用裁决保留原分）。
+        csv_body = (
+            "选手,评委,项目,分数\n"
+            "A,JX,X,9\nB,JX,X,6\nC,JX,X,3\n"
+            "A,JY,Y,2\nB,JY,Y,8\nC,JY,Y,5\n"
+        )
+        client.post(
+            f"/api/sessions/{SID}/upload?scope=judge",
+            files={"file": ("w.csv", csv_body.encode("utf-8-sig"), "text/csv")},
+        )
+        analysis = client.get(f"/api/sessions/{SID}/analysis").json()
+        for blk in analysis["contestants"]:
+            for ib in blk["items"]:
+                for s in ib["scores"]:
+                    client.patch(
+                        f"/api/sessions/{SID}/scores/{s['id']}/decision",
+                        json={"use_raw": True, "reason": "权重分析用原始分"},
+                    )
+
+        r = client.post(
+            f"/api/sessions/{SID}/weight-analysis",
+            json={"item": "X", "upper": 3},
+        )
+        self.assertEqual(r.status_code, 200, r.text)
+        data = r.json()
+        self.assertEqual(data["item"], "X")
+        self.assertEqual(data["upper"], 3)
+        self.assertEqual(data["scope"], "judge")
+        # 缺失项目按 0 贡献：三人在 X 都有分，has_item 全为 True。
+        self.assertTrue(all(c["has_item"] for c in data["contestants"]))
+        # value=X 均分，base=Y 均分。
+        cv = {c["contestant"]: c for c in data["contestants"]}
+        self.assertAlmostEqual(cv["A"]["item_value"], 9.0)
+        self.assertAlmostEqual(cv["A"]["base"], 2.0)
+        # 交点：A-C 6w=3 → w=0.5；A-B 3w=6 → w=2；B-C 3w=-3 → 区间外。
+        crits = sorted(
+            p["weight"] for p in data["critical_points"] if p["kind"] == "critical"
+        )
+        self.assertEqual(len(crits), 2)
+        for got, want in zip(crits, (0.5, 2.0)):
+            self.assertAlmostEqual(got, want)
+        # 端点 0 与 upper 一定存在；中点数 = 内部相邻开区间数。
+        self.assertEqual(data["critical_points"][0]["weight"], 0.0)
+        self.assertAlmostEqual(data["critical_points"][-1]["weight"], 3.0)
+        self.assertEqual(len(data["midpoints"]), 3)
+        # 时间线按倍率递增。
+        ws = [p["weight"] for p in data["timeline"]]
+        self.assertEqual(ws, sorted(ws))
+        # 交点 w=0.5：A=C=6.5 并列第 2，B=11 第 1。
+        p05 = next(p for p in data["critical_points"] if abs(p["weight"] - 0.5) < 1e-9)
+        rows = {x["contestant"]: x for x in p05["standings"]}
+        self.assertEqual(rows["B"]["rank"], 1)
+        self.assertEqual(rows["A"]["rank"], 2)
+        self.assertEqual(rows["C"]["rank"], 2)
+        self.assertTrue(rows["A"]["tied"] and rows["C"]["tied"])
+        self.assertEqual(
+            [g["contestants"] for g in p05["tie_groups"]],
+            [["A", "C"]],
+        )
+        # 交点 w=2：A=B=20 并列第 1，C=11 第 2。
+        p20 = next(p for p in data["critical_points"] if abs(p["weight"] - 2.0) < 1e-9)
+        rows = {x["contestant"]: x for x in p20["standings"]}
+        self.assertEqual(rows["A"]["rank"], 1)
+        self.assertEqual(rows["B"]["rank"], 1)
+        self.assertEqual(rows["C"]["rank"], 2)
+        self.assertEqual(
+            sorted(g["contestants"] for g in p20["tie_groups"]),
+            [["A", "B"]],
+        )
+        # 中点不应有并列。
+        self.assertFalse(
+            any(x["tied"] for m in data["midpoints"] for x in m["standings"])
+        )
+
+        # 只读：再次取分析，评分条数/裁决数不变。
+        again = client.get(f"/api/sessions/{SID}/analysis").json()
+        self.assertEqual(again["counts"]["scores"], 6)
+        self.assertEqual(again["counts"]["decisions"], 6)
+
+    def test_25_weight_analysis_errors_and_refresh(self):
+        analysis = client.get(f"/api/sessions/{SID}/analysis").json()
+        # 未知项目 → 400。
+        r = client.post(
+            f"/api/sessions/{SID}/weight-analysis",
+            json={"item": "不存在", "upper": 2},
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("项目", r.json()["detail"])
+        # 倍率越界 → 422（pydantic 约束）。
+        r2 = client.post(
+            f"/api/sessions/{SID}/weight-analysis",
+            json={"item": analysis["items"][0], "upper": 6},
+        )
+        self.assertEqual(r2.status_code, 422)
+        r3 = client.post(
+            f"/api/sessions/{SID}/weight-analysis",
+            json={"item": analysis["items"][0], "upper": 0},
+        )
+        self.assertEqual(r3.status_code, 422)
+        # 未知会话 → 404。
+        r4 = client.post(
+            "/api/sessions/no-such/weight-analysis",
+            json={"item": "X", "upper": 2},
+        )
+        self.assertEqual(r4.status_code, 404)
+
+        # 裁决变化后重新计算结果随之变化（最终均分基础已变）。
+        before = client.post(
+            f"/api/sessions/{SID}/weight-analysis",
+            json={"item": "X", "upper": 3},
+        ).json()
+        target = next(
+            s
+            for blk in analysis["contestants"]
+            if blk["contestant"] == "A"
+            for ib in blk["items"]
+            for s in ib["scores"]
+            if ib["item"] == "X"
+        )
+        client.patch(
+            f"/api/sessions/{SID}/scores/{target['id']}/decision",
+            json={"use_raw": False, "reason": "恢复校准分"},
+        )
+        after = client.post(
+            f"/api/sessions/{SID}/weight-analysis",
+            json={"item": "X", "upper": 3},
+        ).json()
+        self.assertNotEqual(
+            [p["weight"] for p in before["timeline"]],
+            [p["weight"] for p in after["timeline"]],
+        )
+
+        # 空会话 → 404。
+        client.delete(f"/api/sessions/{SID}")
+        r5 = client.post(
+            f"/api/sessions/{SID}/weight-analysis",
+            json={"item": "X", "upper": 2},
+        )
+        self.assertEqual(r5.status_code, 404)
+
+    def test_26_weight_analysis_missing_and_always_tied(self):
+        # M 在 X 无评分（0 贡献）；A、B 分数完全相同（始终并列）。
+        csv_body = (
+            "选手,评委,项目,分数\n"
+            "A,JX,X,6\nB,JX,X,6\n"
+            "A,JY,Y,4\nB,JY,Y,4\nM,JY,Y,8\n"
+        )
+        client.post(
+            f"/api/sessions/{SID}/upload?scope=judge",
+            files={"file": ("t.csv", csv_body.encode("utf-8-sig"), "text/csv")},
+        )
+        analysis = client.get(f"/api/sessions/{SID}/analysis").json()
+        for blk in analysis["contestants"]:
+            for ib in blk["items"]:
+                for s in ib["scores"]:
+                    client.patch(
+                        f"/api/sessions/{SID}/scores/{s['id']}/decision",
+                        json={"use_raw": True, "reason": ""},
+                    )
+        data = client.post(
+            f"/api/sessions/{SID}/weight-analysis",
+            json={"item": "X", "upper": 3},
+        ).json()
+        # A/B 始终并列不产生交点；6w+4=8（M 恒为 8）→ w=2/3 与 M 相交。
+        self.assertEqual(
+            data["always_tied_groups"],
+            [{"contestants": ["A", "B"], "size": 2}],
+        )
+        crits = [p for p in data["critical_points"] if p["kind"] == "critical"]
+        self.assertEqual(len(crits), 1)
+        self.assertAlmostEqual(crits[0]["weight"], 2 / 3)
+        self.assertEqual(
+            sorted(g["contestants"] for g in crits[0]["tie_groups"]),
+            [["A", "B", "M"]],
+        )
+        cv = {c["contestant"]: c for c in data["contestants"]}
+        self.assertFalse(cv["M"]["has_item"])
+        self.assertEqual(cv["M"]["item_value"], 0.0)
+        client.delete(f"/api/sessions/{SID}")
+
 
 if __name__ == "__main__":
     unittest.main()
